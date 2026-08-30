@@ -73,25 +73,48 @@ const openSession = async (
   label: string,
   recordSession: (sessionId: string) => void,
 ): Promise<string> => {
-  const initialized = await postJson(mcpUrl, bearer, {
-    jsonrpc: "2.0" as const,
-    id: "initialize",
-    method: "initialize",
-    params: {
-      protocolVersion: PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: `executor-e2e-cap-eviction-${label}`, version: "0.0.1" },
-    },
-  });
-  const sessionId = initialized.headers.get("mcp-session-id");
-  if (!sessionId) {
+  // The platform can reset a session Durable Object while its initialize is
+  // in flight (a burst of cold starts makes the agents SDK's
+  // blockConcurrencyWhile start-up block outlive the runtime's budget). The
+  // server answers that with the restart envelope — 503, JSON-RPC -32001,
+  // `MCP session is restarting, please retry` — which is exactly the
+  // contract a real streamable-http client honors: same request, after the
+  // advertised delay. Treat it as transient here too instead of failing the
+  // scenario on a retryable platform blip.
+  const RESTART_ATTEMPTS = 8;
+  const RESTART_DELAY_MS = 250;
+  let minted: { readonly response: Response; readonly sessionId: string } | undefined;
+  for (let attempt = 0; attempt < RESTART_ATTEMPTS; attempt += 1) {
+    const response = await postJson(mcpUrl, bearer, {
+      jsonrpc: "2.0" as const,
+      id: "initialize",
+      method: "initialize",
+      params: {
+        protocolVersion: PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: `executor-e2e-cap-eviction-${label}`, version: "0.0.1" },
+      },
+    });
+    const candidate = response.headers.get("mcp-session-id");
+    if (candidate !== null && candidate.length > 0) {
+      minted = { response, sessionId: candidate };
+      break;
+    }
+    const body = await response.text().catch(() => "");
+    const isRestart = response.status === 503 && body.includes("MCP session is restarting");
+    if (!isRestart) break;
+    if (attempt === RESTART_ATTEMPTS - 1) break;
+    await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
+  }
+  if (!minted) {
     // oxlint-disable-next-line executor/no-error-constructor -- boundary: e2e setup precondition.
     throw new Error(`openSession (${label}): no mcp-session-id header`);
   }
-  // Recorded the moment the id exists — BEFORE the body read and status
+  const { response: initialized, sessionId } = minted;
+  // Recorded the moment the id exists - BEFORE the body read and status
   // assertion below, either of which can throw with the session already live
   // on the server. The cleanup finalizer needs the id on every one of those
-  // paths, not just a fully successful return.
+  // paths, not just on a fully successful return.
   recordSession(sessionId);
   await initialized.text();
   expect(initialized.status, `initialize (${label}) opens a session`).toBe(200);
@@ -161,6 +184,10 @@ scenario(
               openedSessionIds.push(sessionId);
             }),
           ),
+        // Sequential admission: one serialized PGlite instance, and cold DO
+        // starts must not overlap into workerd reset territory either (see
+        // openSession's restart-retry backstop for the 503 envelope that a
+        // reset mid-initialize produces).
         { concurrency: 1 },
       );
 
