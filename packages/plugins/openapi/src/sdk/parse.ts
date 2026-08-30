@@ -4,6 +4,7 @@ import { HttpClient, HttpClientRequest } from "effect/unstable/http";
 import { JSON_SCHEMA, load as parseYamlDocument } from "js-yaml";
 
 import { OpenApiExtractionError, OpenApiParseError } from "./errors";
+import { assertFetchable } from "@executor-js/sdk";
 
 export type ParsedDocument = OpenAPIV3.Document | OpenAPIV3_1.Document;
 
@@ -73,12 +74,28 @@ export const fetchSpecText = Effect.fn("OpenApi.fetchSpecText")(function* (
   credentials?: SpecFetchCredentials,
 ) {
   const client = yield* HttpClient.HttpClient;
+  // Egress guard (audit H2): reject private/link-local/metadata targets
+  // BEFORE any fetch. Resolves hostnames and pins the resolved address so
+  // the connect cannot rebind. Coarse error — no topology leaked.
+  const pinned = yield* assertFetchable(url).pipe(
+    Effect.mapError(
+      () => new OpenApiParseError({ message: "Blocked by egress policy" }),
+    ),
+  );
   const requestUrl = new URL(url);
+  // Pin: connect to the validated address, preserving the original host for
+  // the Host header / SNI. (HttpClient has no custom-connect hook; the URL
+  // rewrite is the effective pin for the http/https path.) The Host header
+  // must be set explicitly — rewriting hostname alone would send Host: <ip>
+  // and break virtual-host routing on the target.
+  const originalHost = requestUrl.host;
+  requestUrl.hostname = pinned.resolvedAddress;
   for (const [name, value] of Object.entries(credentials?.queryParams ?? {})) {
     requestUrl.searchParams.set(name, value);
   }
   let request = HttpClientRequest.get(requestUrl.toString()).pipe(
     HttpClientRequest.setHeader("Accept", "application/json, application/yaml, text/yaml, */*"),
+    HttpClientRequest.setHeader("Host", originalHost),
   );
   for (const [name, value] of Object.entries(credentials?.headers ?? {})) {
     request = HttpClientRequest.setHeader(request, name, value);
