@@ -43,6 +43,13 @@ const capturingErrorCapture = Layer.succeed(ErrorCapture, {
 // oxlint-disable-next-line executor/no-double-cast -- minimal executor double: only pendingApprovals.put and artifacts.get are exercised
 const failingExecutor = {
   pendingApprovals: failingPendingApprovals,
+  executionRecords: {
+    // The pause path also tombstones the execution (best-effort, its own
+    // catchCause); this double succeeds so the approval-logging assertions
+    // below observe ONLY the pendingApprovals failure surface.
+    put: () => Effect.void,
+    get: () => Effect.succeed(null),
+  },
   artifacts: {
     // Real-shaped artifact with a binding for the role the test's action
     // code names ("repo") — resolveArtifactAction rewrites the role into
