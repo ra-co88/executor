@@ -99,9 +99,7 @@ const openSession = async (
       break;
     }
     const body = await response.text().catch(() => "");
-    const isRestart =
-      response.status === 503 &&
-      body.includes("MCP session is restarting");
+    const isRestart = response.status === 503 && body.includes("MCP session is restarting");
     if (!isRestart) break;
     if (attempt === RESTART_ATTEMPTS - 1) break;
     await new Promise((resolve) => setTimeout(resolve, RESTART_DELAY_MS));
