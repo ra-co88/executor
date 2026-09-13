@@ -172,6 +172,7 @@
     },
   ],
   "ignorePatterns": [
+    ".agents/",
     ".astro/",
     ".reference/",
     ".references/",
